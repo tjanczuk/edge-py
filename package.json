@@ -1,0 +1,24 @@
+{
+  "name": "edge-py",
+  "author": {
+    "name": "Tomasz Janczuk <tomasz@janczuk.org>",
+    "url": "http://tomasz.janczuk.org",
+    "twitter": "tjanczuk"
+  },
+  "version": "0.1.0-pre",
+  "description": "Edge-py: run Python and node.js code in-process with edge.js",
+  "tags" : ["edge", "edgejs", "net", "clr", "python", "managed", ".net", "ironpython", "node.js", "node"],
+  "main": "./lib/edge-py.js",
+  "engines": { "node": ">= 0.6" },
+  "licenses": [ { "type": "Apache", "url": "http://www.apache.org/licenses/LICENSE-2.0" } ],
+  "dependencies": {
+  },
+  "homepage": "http://tjanczuk.github.com/edge",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:tjanczuk/edge-py.git"
+  },
+  "bugs" : {
+    "url" : "http://github.com/tjanczuk/edge-py/issues"
+  }
+}
