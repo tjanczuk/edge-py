@@ -8,150 +8,93 @@ using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using IronPython.Hosting;
+using IronPython.Runtime;
+using Microsoft.Scripting.Hosting;
 
 public class EdgeCompiler
 {
-    static readonly Regex referencesRegex = new Regex(@"\/\/\#r\s+""[^""]+""\s*", RegexOptions.Multiline);
-    static readonly Regex referenceRegex = new Regex(@"\/\/\#r\s+""([^""]+)""\s*");
-    static readonly bool debuggingEnabled = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("EDGE_CS_DEBUG"));
+    static readonly Regex whitespacePrefixRegex = new Regex(@"^(\s*)[^#\r\n]");
 
     public Func<object, Task<object>> CompileFunc(IDictionary<string, object> parameters)
     {
-        string source = (string)parameters["source"];
-        string lineDirective = string.Empty;
-        string fileName = null;
-        int lineNumber = 1;
+        string source = this.NormalizeSource((string)parameters["source"]);
 
-        // read source from file
-        if (source.EndsWith(".cs", StringComparison.InvariantCultureIgnoreCase)
-            || source.EndsWith(".csx", StringComparison.InvariantCultureIgnoreCase))
+        bool sync = false;
+        object tmp;
+        if (parameters.TryGetValue("sync", out tmp))
         {
-            // retain fileName for debugging purposes
-            if (debuggingEnabled)
-            {
-                fileName = source;
-            }
-
-            source = File.ReadAllText(source);
+            sync = (bool)tmp;
         }
 
-        // add assembly references provided explicitly through parameters
-        List<string> references = new List<string>();
-        object v;
-        if (parameters.TryGetValue("references", out v))
+        // Compile to a Python lambda expression
+        ScriptEngine engine = Python.CreateEngine();
+        ScriptSource script = engine.CreateScriptSourceFromString(source, "path-to-py");
+        PythonFunction pythonFunc = script.Execute() as PythonFunction;
+        if (pythonFunc == null)
         {
-            foreach (object reference in (object[])v)
-            {
-                references.Add((string)reference);
-            }
+            throw new InvalidOperationException("The Python code must evaluate to a Python lambda expression that takes one parameter, e.g. `lambda x: x + 1`.");
         }
-
-        // add assembly references provided in code as //#r "assemblyname" comments
-        foreach (Match match in referencesRegex.Matches(source))
-        {
-            Match referenceMatch = referenceRegex.Match(match.Value);
-            if (referenceMatch.Success)
-            {
-                references.Add(referenceMatch.Groups[1].Value);
-            }
-        }
-
-        if (debuggingEnabled)
-        {
-            object jsFileName;
-            if (parameters.TryGetValue("jsFileName", out jsFileName))
-            {
-                fileName = (string)jsFileName;
-                lineNumber = (int)parameters["jsLineNumber"];
-            }
-            
-            if (!string.IsNullOrEmpty(fileName)) 
-            {
-                lineDirective = string.Format("#line {0} \"{1}\"\n", lineNumber, fileName);
-            }
-        }
-
-        // try to compile source code as a class library
-        Assembly assembly;
-        string errorsClass;
-        if (!this.TryCompile(lineDirective + source, references, out errorsClass, out assembly))
-        {
-            // try to compile source code as an async lambda expression
-            string errorsLambda;
-            source = 
-                "using System;\n"
-                + "using System.Threading.Tasks;\n"
-                + "public class Startup {\n"
-                + "    public async Task<object> Invoke(object ___input) {\n"
-                + lineDirective
-                + "        Func<object, Task<object>> func = " + source + ";\n"
-                + "#line hidden\n"
-                + "        return await func(___input);\n"
-                + "    }\n"
-                + "}";
-
-            if (!TryCompile(source, references, out errorsLambda, out assembly))
-            {
-                throw new InvalidOperationException(
-                    "Unable to compile C# code.\n----> Errors when compiling as a CLR library:\n"
-                    + errorsClass
-                    + "\n----> Errors when compiling as a CLR async lambda expression:\n"
-                    + errorsLambda);
-            }
-        }
-
-        // extract the entry point to a class method
-        Type startupType = assembly.GetType((string)parameters["typeName"], true, true);
-        object instance = Activator.CreateInstance(startupType, false);
-        MethodInfo invokeMethod = startupType.GetMethod((string)parameters["methodName"], BindingFlags.Instance | BindingFlags.Public);
-        if (invokeMethod == null)
-        {
-            throw new InvalidOperationException("Unable to access CLR method to wrap through reflection. Make sure it is a public instance method.");
-        }
+        
+        ObjectOperations operations = engine.CreateOperations();
 
         // create a Func<object,Task<object>> delegate around the method invocation using reflection
-        Func<object,Task<object>> result = (input) => 
+
+        if (sync)
         {
-            return (Task<object>)invokeMethod.Invoke(instance, new object[] { input });
-        };
-
-        return result;
-    }
-
-    bool TryCompile(string source, List<string> references, out string errors, out Assembly assembly)
-    {
-        bool result = false;
-        assembly = null;
-        errors = null;
-
-        Dictionary<string, string> options = new Dictionary<string, string> { { "CompilerVersion", "v4.0" } };
-        CSharpCodeProvider csc = new CSharpCodeProvider(options);
-        CompilerParameters parameters = new CompilerParameters();
-        parameters.GenerateInMemory = true;
-        parameters.IncludeDebugInformation = debuggingEnabled;
-        parameters.ReferencedAssemblies.AddRange(references.ToArray());
-        parameters.ReferencedAssemblies.Add("System.dll");
-        CompilerResults results = csc.CompileAssemblyFromSource(parameters, source);
-        if (results.Errors.HasErrors)
-        {
-            foreach (CompilerError error in results.Errors)
+            return (input) => 
             {
-                if (errors == null)
-                {
-                    errors = error.ToString();
-                }
-                else
-                {
-                    errors += "\n" + error.ToString();
-                }
-            }
+                object ret = operations.Invoke(pythonFunc, new object[] { input });
+                return Task.FromResult<object>(ret);
+            };
         }
         else
         {
-            assembly = results.CompiledAssembly;
-            result = true;
+            return (input) =>
+            {
+                var task = new Task<object>(() =>
+                {
+                    object ret = operations.Invoke(pythonFunc, new object[] { input });
+                    return ret;
+                });
+
+                task.Start();
+
+                return task;
+            };
+        }
+    }
+
+    string NormalizeSource(string source)
+    {
+        if (source.EndsWith(".py", StringComparison.InvariantCultureIgnoreCase))
+        {
+            // Read source from file
+            source = File.ReadAllText(source);
+        }
+        else
+        {
+            // Remove the whitespace prefix found on the first line contaning source from all source lines.
+            // This is to allow indenting Python code embedded in node.js sources.
+            string[] lines = source.Split('\n');
+            string prefix = null;
+            foreach (string line in lines)
+            {
+                Match prefixMatch = whitespacePrefixRegex.Match(line);
+                if (prefixMatch.Success)
+                {
+                    prefix = prefixMatch.Groups[1].Value;
+                    break;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(prefix))
+            {
+                Regex replacement = new Regex("^" + prefix, RegexOptions.Multiline);
+                source = replacement.Replace(source, string.Empty);
+            }
         }
 
-        return result;
+        return source;
     }
 }
