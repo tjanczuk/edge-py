@@ -5,7 +5,7 @@
     "url": "http://tomasz.janczuk.org",
     "twitter": "tjanczuk"
   },
-  "version": "0.1.0-pre",
+  "version": "0.1.0",
   "description": "Edge-py: run Python and node.js code in-process with edge.js",
   "tags" : ["edge", "edgejs", "net", "clr", "python", "managed", ".net", "ironpython", "node.js", "node"],
   "main": "./lib/edge-py.js",
